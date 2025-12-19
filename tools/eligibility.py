@@ -376,6 +376,7 @@ def evaluate_eligibility(
         
     Returns:
         Evaluation results dictionary
+
     """
     # Create user profile
     profile = UserProfile(**user_data)
