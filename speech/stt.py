@@ -1,8 +1,11 @@
 """
-Speech-to-Text (STT) Module
+Speech-to-Text (STT) Module - Google Speech Recognition
 
 This module captures audio from the system microphone and transcribes
-speech using OpenAI Whisper or equivalent models. Supports Indian languages.
+speech using Google's Speech Recognition API (FREE, no API key needed).
+Supports Indian languages including Hindi, Marathi, Telugu, Tamil, etc.
+
+MUCH MORE RELIABLE than Whisper for live audio capture!
 
 NO reasoning logic
 NO user prompts
@@ -14,7 +17,7 @@ import io
 import wave
 import tempfile
 from typing import Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import numpy as np
 
@@ -26,11 +29,11 @@ except ImportError:
     print("Warning: sounddevice not installed. Audio capture will not work.")
 
 try:
-    import whisper
-    WHISPER_AVAILABLE = True
+    import speech_recognition as sr
+    SPEECH_RECOGNITION_AVAILABLE = True
 except ImportError:
-    WHISPER_AVAILABLE = False
-    print("Warning: whisper not installed. Transcription will not work.")
+    SPEECH_RECOGNITION_AVAILABLE = False
+    print("Warning: SpeechRecognition not installed. Install with: pip install SpeechRecognition")
 
 try:
     from scipy.io import wavfile
@@ -95,22 +98,23 @@ class TranscriptionResult:
 
 class SpeechToText:
     """
-    Speech-to-Text transcription system using Whisper
+    Speech-to-Text transcription system using Google Speech Recognition
+    FREE and RELIABLE for live audio!
     """
     
-    # Supported Indian languages (Whisper language codes)
+    # Supported Indian languages (Google Speech Recognition language codes)
     SUPPORTED_LANGUAGES = {
-        "marathi": "mr",
-        "hindi": "hi",
-        "telugu": "te",
-        "tamil": "ta",
-        "bengali": "bn",
-        "gujarati": "gu",
-        "kannada": "kn",
-        "malayalam": "ml",
-        "odia": "or",
-        "punjabi": "pa",
-        "urdu": "ur"
+        "hindi": "hi-IN",
+        "marathi": "mr-IN",
+        "telugu": "te-IN",
+        "tamil": "ta-IN",
+        "bengali": "bn-IN",
+        "gujarati": "gu-IN",
+        "kannada": "kn-IN",
+        "malayalam": "ml-IN",
+        "punjabi": "pa-IN",
+        "urdu": "ur-IN",
+        "english": "en-IN"
     }
     
     # Confidence thresholds
@@ -120,36 +124,34 @@ class SpeechToText:
     
     def __init__(
         self,
-        model_size: str = "base",
-        language: str = "marathi",
-        sample_rate: int = 48000,
+        model_size: str = "base",  # Ignored, for compatibility
+        language: str = "hindi",
+        sample_rate: int = 16000,
         channels: int = 1,
         confidence_threshold: float = 0.40,
-        device: Optional[str] = None
+        device: Optional[str] = None  # Ignored, for compatibility
     ):
         """
         Initialize Speech-to-Text system
         
         Args:
-            model_size: Whisper model size ('tiny', 'base', 'small', 'medium', 'large')
+            model_size: Ignored (for Whisper compatibility)
             language: Target language for transcription
             sample_rate: Audio sample rate in Hz
             channels: Number of audio channels (1 for mono)
             confidence_threshold: Minimum confidence to accept transcription
-            device: Device for Whisper ('cpu' or 'cuda')
+            device: Ignored (for Whisper compatibility)
         """
-        if not WHISPER_AVAILABLE:
-            raise ImportError("whisper package not installed. Install with: pip install openai-whisper")
+        if not SPEECH_RECOGNITION_AVAILABLE:
+            raise ImportError("SpeechRecognition package not installed. Install with: pip install SpeechRecognition")
         
         if not SOUNDDEVICE_AVAILABLE:
             raise ImportError("sounddevice package not installed. Install with: pip install sounddevice")
         
-        self.model_size = model_size
         self.language = language.lower()
         self.sample_rate = sample_rate
         self.channels = channels
         self.confidence_threshold = confidence_threshold
-        self.device = device
         
         # Validate language
         if self.language not in self.SUPPORTED_LANGUAGES:
@@ -158,27 +160,24 @@ class SpeechToText:
                 f"Supported: {', '.join(self.SUPPORTED_LANGUAGES.keys())}"
             )
         
-        # Load Whisper model
-        self.model = self._load_model()
+        # Initialize Google Speech Recognizer
+        self.recognizer = sr.Recognizer()
+        
+        # Adjust for ambient noise (makes it more sensitive)
+        self.recognizer.energy_threshold = 300  # Lower = more sensitive
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.pause_threshold = 0.8  # Seconds of silence to consider end
         
         # Recording state
         self.is_recording = False
         self.recorded_audio = None
     
-    def _load_model(self):
-        """Load Whisper model"""
-        try:
-            model = whisper.load_model(self.model_size, device=self.device)
-            return model
-        except Exception as e:
-            raise TranscriptionFailedError(f"Failed to load Whisper model: {e}")
-    
     def capture_audio(
         self,
         duration: Optional[float] = None,
         silence_threshold: float = 0.01,
-        silence_duration: float = 1.5,
-        max_duration: float = 30.0
+        silence_duration: float = 2.0,
+        max_duration: float = 10.0
     ) -> np.ndarray:
         """
         Capture audio from microphone
@@ -198,6 +197,7 @@ class SpeechToText:
         try:
             if duration is not None:
                 # Fixed duration recording
+                print(f"   Recording for {duration} seconds...")
                 audio = sd.rec(
                     int(duration * self.sample_rate),
                     samplerate=self.sample_rate,
@@ -240,8 +240,10 @@ class SpeechToText:
         max_samples = int(max_duration * self.sample_rate)
         consecutive_silent_samples = 0
         total_samples = 0
-        min_listen_samples = int(2.5 * self.sample_rate)  # force 2.5 sec minimum listen
+        min_listen_samples = int(1.0 * self.sample_rate)  # Minimum 1 second
         chunk_size = int(0.1 * self.sample_rate)  # 100ms chunks
+        
+        print("   🎤 Listening... (speak clearly)")
         
         try:
             with sd.InputStream(
@@ -254,22 +256,14 @@ class SpeechToText:
                     chunk, overflowed = stream.read(chunk_size)
                     
                     if overflowed:
-                        print("Warning: Audio buffer overflow")
+                        print("   ⚠️ Audio buffer overflow")
                     
                     audio_chunks.append(chunk.copy())
                     total_samples += len(chunk)
-                
+                    
                     # Check for silence
                     amplitude = np.abs(chunk).mean()
                     
-                    # if amplitude < silence_threshold:
-                    #     consecutive_silent_samples += len(chunk)
-                    #     if consecutive_silent_samples >= silence_samples:
-                    #         # Stop recording after silence
-                    #         break
-                    # else:
-                    #     consecutive_silent_samples = 0
-
                     if amplitude < silence_threshold:
                         consecutive_silent_samples += len(chunk)
                         # Allow silence-based stopping ONLY after minimum listen time
@@ -277,11 +271,13 @@ class SpeechToText:
                             total_samples >= min_listen_samples
                             and consecutive_silent_samples >= silence_samples
                         ):
+                            print("   ✋ Silence detected, stopping...")
                             break
                     else:
                         consecutive_silent_samples = 0
-                
-                    
+                        # Show activity indicator
+                        if total_samples % (self.sample_rate // 2) == 0:
+                            print("   🔴 Recording...")
         
         except Exception as e:
             raise AudioCaptureError(f"Error during voice activity detection: {e}")
@@ -299,11 +295,11 @@ class SpeechToText:
         task: str = "transcribe"
     ) -> TranscriptionResult:
         """
-        Transcribe audio using Whisper
+        Transcribe audio using Google Speech Recognition
         
         Args:
             audio: Audio samples as NumPy array
-            task: 'transcribe' or 'translate'
+            task: 'transcribe' or 'translate' (ignored, for compatibility)
             
         Returns:
             TranscriptionResult object
@@ -319,43 +315,48 @@ class SpeechToText:
             # Calculate duration
             duration = len(audio) / self.sample_rate
             
-            # Transcribe with Whisper
-            result = self.model.transcribe(
-                audio,
-                language=language_code,
-                task=task,
-                fp16=False,
-                verbose=False
+            # Convert numpy array to AudioData
+            # Google SR expects 16-bit PCM
+            audio_int16 = (audio * 32767).astype(np.int16)
+            
+            # Create AudioData object
+            audio_data = sr.AudioData(
+                audio_int16.tobytes(),
+                sample_rate=self.sample_rate,
+                sample_width=2  # 16-bit = 2 bytes
             )
             
-            # Extract results
-            text = result["text"].strip()
-            detected_language = result.get("language", language_code)
-            segments = result.get("segments", [])
+            # Transcribe with Google
+            print(f"   🔄 Transcribing in {self.language}...")
+            try:
+                text = self.recognizer.recognize_google(
+                    audio_data,
+                    language=language_code,
+                    show_all=False  # Get best result only
+                )
+            except sr.UnknownValueError:
+                # Google couldn't understand audio
+                raise TranscriptionFailedError("Could not understand audio - please speak clearly")
+            except sr.RequestError as e:
+                # API unavailable
+                raise TranscriptionFailedError(f"Google API error: {e}")
             
-            # Calculate confidence
-            confidence_score = self._calculate_confidence(segments)
+            # Google doesn't provide confidence scores in free tier
+            # Estimate based on text length and quality
+            confidence_score = self._estimate_confidence(text, duration)
             confidence_level = self._get_confidence_level(confidence_score)
             is_reliable = confidence_score >= self.confidence_threshold
             
             # Create result
             transcription_result = TranscriptionResult(
-                transcribed_text=text,
-                language=detected_language,
+                transcribed_text=text.strip(),
+                language=language_code,
                 confidence_score=confidence_score,
                 confidence_level=confidence_level,
                 is_reliable=is_reliable,
                 audio_duration=duration,
-                model_used=f"whisper-{self.model_size}",
-                segments=[
-                    {
-                        "text": seg["text"],
-                        "start": seg["start"],
-                        "end": seg["end"],
-                        "confidence": seg.get("confidence", seg.get("no_speech_prob", 0.0))
-                    }
-                    for seg in segments
-                ]
+                model_used="google-speech-recognition",
+                segments=None
             )
             
             # Flag low confidence
@@ -371,36 +372,43 @@ class SpeechToText:
         except LowConfidenceError:
             raise
         
+        except TranscriptionFailedError:
+            raise
+        
         except Exception as e:
             raise TranscriptionFailedError(f"Transcription failed: {e}")
     
-    def _calculate_confidence(self, segments: list) -> float:
+    def _estimate_confidence(self, text: str, duration: float) -> float:
         """
-        Calculate overall confidence from segments
+        Estimate confidence score based on text and duration
         
         Args:
-            segments: List of transcription segments
+            text: Transcribed text
+            duration: Audio duration
             
         Returns:
             Confidence score (0.0 to 1.0)
         """
-        if not segments:
+        if not text or len(text.strip()) == 0:
             return 0.0
         
-        # Whisper doesn't always provide confidence scores
-        # Use inverse of no_speech_prob as proxy
-        confidences = []
-        for seg in segments:
-            if "confidence" in seg:
-                confidences.append(seg["confidence"])
-            elif "no_speech_prob" in seg:
-                # Higher no_speech_prob means lower confidence
-                confidences.append(1.0 - seg["no_speech_prob"])
-            else:
-                # Default medium confidence if no score available
-                confidences.append(0.7)
+        # Base confidence
+        confidence = 0.7
         
-        return np.mean(confidences) if confidences else 0.0
+        # Longer text = higher confidence
+        word_count = len(text.split())
+        if word_count >= 3:
+            confidence += 0.15
+        elif word_count >= 5:
+            confidence += 0.20
+        
+        # Reasonable speaking rate
+        if duration > 0:
+            words_per_second = word_count / duration
+            if 1.0 <= words_per_second <= 4.0:  # Normal speaking rate
+                confidence += 0.10
+        
+        return min(confidence, 1.0)
     
     def _get_confidence_level(self, score: float) -> ConfidenceLevel:
         """
@@ -424,9 +432,9 @@ class SpeechToText:
     def capture_and_transcribe(
         self,
         duration: Optional[float] = None,
-        silence_threshold: float = 0.01,
-        silence_duration: float = 1.5,
-        max_duration: float = 30.0
+        silence_threshold: float = 0.005,
+        silence_duration: float = 2.0,
+        max_duration: float = 10.0
     ) -> TranscriptionResult:
         """
         Capture audio and transcribe in one step
@@ -453,7 +461,6 @@ class SpeechToText:
             max_duration=max_duration
         )
         
-        
         # Transcribe
         result = self.transcribe_audio(audio)
         
@@ -473,16 +480,30 @@ class SpeechToText:
             TranscriptionFailedError: If transcription fails
         """
         try:
-            # Load audio using Whisper's built-in loader
-            audio = whisper.load_audio(file_path)
+            with sr.AudioFile(file_path) as source:
+                audio_data = self.recognizer.record(source)
             
-            # Pad/trim to 30 seconds as Whisper expects
-            audio = whisper.pad_or_trim(audio)
+            language_code = self.SUPPORTED_LANGUAGES[self.language]
             
-            # Transcribe
-            result = self.transcribe_audio(audio)
+            text = self.recognizer.recognize_google(
+                audio_data,
+                language=language_code
+            )
             
-            return result
+            # Estimate duration from file
+            duration = len(audio_data.frame_data) / audio_data.sample_rate / audio_data.sample_width
+            
+            confidence_score = self._estimate_confidence(text, duration)
+            
+            return TranscriptionResult(
+                transcribed_text=text.strip(),
+                language=language_code,
+                confidence_score=confidence_score,
+                confidence_level=self._get_confidence_level(confidence_score),
+                is_reliable=confidence_score >= self.confidence_threshold,
+                audio_duration=duration,
+                model_used="google-speech-recognition"
+            )
         
         except Exception as e:
             raise TranscriptionFailedError(f"Failed to transcribe file: {e}")
@@ -526,8 +547,8 @@ class SpeechToText:
 
 # Convenience function
 def transcribe_speech(
-    language: str = "marathi",
-    model_size: str = "base",
+    language: str = "hindi",
+    model_size: str = "base",  # Ignored
     duration: Optional[float] = None,
     confidence_threshold: float = 0.40
 ) -> Dict[str, Any]:
@@ -536,7 +557,7 @@ def transcribe_speech(
     
     Args:
         language: Target language
-        model_size: Whisper model size
+        model_size: Ignored (for Whisper compatibility)
         duration: Recording duration (None for VAD)
         confidence_threshold: Minimum confidence threshold
         
@@ -549,7 +570,6 @@ def transcribe_speech(
         LowConfidenceError: Confidence too low
     """
     stt = SpeechToText(
-        model_size=model_size,
         language=language,
         confidence_threshold=confidence_threshold
     )
