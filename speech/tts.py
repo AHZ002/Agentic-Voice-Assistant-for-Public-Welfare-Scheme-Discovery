@@ -17,6 +17,9 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+import pygame
+pygame.mixer.init()
+
 
 try:
     from gtts import gTTS

@@ -9,7 +9,6 @@ NO user prompts
 NO conversational text
 Pure transcription only
 """
-
 import os
 import io
 import wave
@@ -123,7 +122,7 @@ class SpeechToText:
         self,
         model_size: str = "base",
         language: str = "marathi",
-        sample_rate: int = 16000,
+        sample_rate: int = 48000,
         channels: int = 1,
         confidence_threshold: float = 0.40,
         device: Optional[str] = None
@@ -241,6 +240,7 @@ class SpeechToText:
         max_samples = int(max_duration * self.sample_rate)
         consecutive_silent_samples = 0
         total_samples = 0
+        min_listen_samples = int(2.5 * self.sample_rate)  # force 2.5 sec minimum listen
         chunk_size = int(0.1 * self.sample_rate)  # 100ms chunks
         
         try:
@@ -258,17 +258,30 @@ class SpeechToText:
                     
                     audio_chunks.append(chunk.copy())
                     total_samples += len(chunk)
-                    
+                
                     # Check for silence
                     amplitude = np.abs(chunk).mean()
                     
+                    # if amplitude < silence_threshold:
+                    #     consecutive_silent_samples += len(chunk)
+                    #     if consecutive_silent_samples >= silence_samples:
+                    #         # Stop recording after silence
+                    #         break
+                    # else:
+                    #     consecutive_silent_samples = 0
+
                     if amplitude < silence_threshold:
                         consecutive_silent_samples += len(chunk)
-                        if consecutive_silent_samples >= silence_samples:
-                            # Stop recording after silence
+                        # Allow silence-based stopping ONLY after minimum listen time
+                        if (
+                            total_samples >= min_listen_samples
+                            and consecutive_silent_samples >= silence_samples
+                        ):
                             break
                     else:
                         consecutive_silent_samples = 0
+                
+                    
         
         except Exception as e:
             raise AudioCaptureError(f"Error during voice activity detection: {e}")
@@ -439,6 +452,7 @@ class SpeechToText:
             silence_duration=silence_duration,
             max_duration=max_duration
         )
+        
         
         # Transcribe
         result = self.transcribe_audio(audio)

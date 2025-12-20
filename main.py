@@ -1,5 +1,3 @@
-# main.py
-
 """
 Voice-First Agentic AI System - Main Entry Point
 -------------------------------------------------
@@ -7,12 +5,20 @@ Orchestrates the complete voice interaction loop with agentic decision-making.
 All user-facing interaction happens in Marathi (can be configured to other languages).
 """
 
+import sounddevice as sd
+sd.default.device = (9, None)
+
 import sys
 import os
 import time
-import logging
 from typing import Optional, Dict, Any
 from pathlib import Path
+
+import logging
+
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent))
@@ -68,21 +74,15 @@ class VoiceAgentOrchestrator:
         
         # Initialize memory components
         logger.info("Initializing memory systems...")
-        # self.session_memory = SessionMemory(session_id=self.session_id)
         self.session_memory = SessionMemory()
-        self.contradiction_handler = ContradictionHandler(memory=self.session_memory)
+        self.contradiction_handler = ContradictionHandler()
+
         
         # Initialize agent components
         logger.info("Initializing agent components...")
         self.state_machine = AgentStateMachine()
-        self.planner = Planner(
-            language=target_language,
-            memory=self.session_memory
-        )
-        self.executor = Executor(
-            memory=self.session_memory,
-            language=target_language
-        )
+        self.planner = Planner()
+        self.executor = Executor()
         self.evaluator = Evaluator()
         
         # Interaction state
@@ -91,7 +91,7 @@ class VoiceAgentOrchestrator:
         self.consecutive_failures = 0
         self.max_consecutive_failures = 3
         
-        logger.info("✓ All components initialized successfully")
+        logger.info("All components initialized successfully")
     
     def start(self):
         """Start the voice agent interaction loop"""
@@ -113,10 +113,10 @@ class VoiceAgentOrchestrator:
             while self.is_running:
                 self._interaction_turn()
         except KeyboardInterrupt:
-            logger.info("\n⚠ Keyboard interrupt received")
+            logger.info("\n Keyboard interrupt received")
             self._graceful_shutdown()
         except Exception as e:
-            logger.error(f"❌ Critical error in main loop: {e}", exc_info=True)
+            logger.error(f" Critical error in main loop: {e}", exc_info=True)
             self._emergency_shutdown()
     
     def _interaction_turn(self):
@@ -131,48 +131,63 @@ class VoiceAgentOrchestrator:
         user_speech = self._listen_to_user()
         
         if user_speech is None:
-            logger.warning("⚠ No speech detected, prompting user again")
+            logger.warning("No speech detected, prompting user again")
             self._handle_no_speech()
             return
         
         # Step 2: Check for exit intent
         if self._is_exit_intent(user_speech):
-            logger.info("🚪 Exit intent detected")
+            logger.info("Exit intent detected")
             self._graceful_shutdown()
             return
         
-        # Step 3: Handle contradictions in memory
-        contradiction_result = self._check_for_contradictions(user_speech)
-        if contradiction_result["has_contradiction"]:
-            logger.warning(f"⚠ Contradiction detected: {contradiction_result['message']}")
-            self._handle_contradiction(contradiction_result)
-            return
-        
-        # Step 4: Plan next action
+        # Step 3: Plan next action
         plan = self._plan_action(user_speech)
         
         if plan is None:
-            logger.error("❌ Planner failed to generate action")
+            logger.error("Planner failed to generate action")
             self._handle_planning_failure()
             return
         
-        logger.info(f"📋 PLAN: {plan['action_type']} | Reasoning: {plan.get('reasoning', 'N/A')}")
+        logger.info(f"PLAN: {plan['action_type']} | Reasoning: {plan.get('reasoning', 'N/A')}")
+        
+        # Step 4: Check for contradictions (using planner-extracted data)
+        contradiction_result = self._check_for_contradictions(plan)
+        if contradiction_result["has_contradiction"]:
+            logger.warning(f"Contradiction detected: {contradiction_result['message']}")
+            response = self._handle_contradiction(contradiction_result)
+            # Store turn with contradiction handling
+            self.session_memory.add_turn(
+                user_input_marathi=user_speech,
+                agent_response_marathi=response,
+                extracted_info=plan.get("extracted_data"),
+                tools_used=["contradiction_handler"]
+            )
+            return
         
         # Step 5: Execute action
         execution_result = self._execute_action(plan)
         
-        logger.info(f"⚙️ EXECUTION: Status={execution_result.get('success', 'unknown')}")
+        logger.info(f"EXECUTION: Status={execution_result.get('success', 'unknown')}")
         
         # Step 6: Evaluate results
         evaluation = self._evaluate_result(plan['action_type'], execution_result)
         
-        logger.info(f"✓ EVALUATION: {evaluation.status.value} | Confidence={evaluation.confidence:.2f}")
-        logger.info(f"   Reasoning: {evaluation.reasoning}")
+        logger.info(f"EVALUATION: {evaluation.status.value} | Confidence={evaluation.confidence:.2f}")
+        logger.info(f" Reasoning: {evaluation.reasoning}")
         
-        # Step 7: Handle evaluation outcome
-        self._handle_evaluation(evaluation, plan, execution_result)
+        # Step 7: Handle evaluation outcome and get response
+        agent_response = self._handle_evaluation(evaluation, plan, execution_result)
         
-        # Step 8: Update state machine
+        # Step 8: Store complete turn in memory (SINGLE CALL)
+        self.session_memory.add_turn(
+            user_input_marathi=user_speech,
+            agent_response_marathi=agent_response,
+            extracted_info=plan.get("extracted_data"),
+            tools_used=execution_result.get("tools_used")
+        )
+        
+        # Step 9: Update state machine
         self._update_state(evaluation, plan)
         
         # Reset failure counter on success
@@ -183,7 +198,7 @@ class VoiceAgentOrchestrator:
             
         # Check if too many failures
         if self.consecutive_failures >= self.max_consecutive_failures:
-            logger.error(f"❌ Too many consecutive failures ({self.consecutive_failures})")
+            logger.error(f"Too many consecutive failures ({self.consecutive_failures})")
             self._handle_repeated_failures()
     
     def _listen_to_user(self) -> Optional[str]:
@@ -193,38 +208,33 @@ class VoiceAgentOrchestrator:
         Returns:
             Transcribed text or None if failed
         """
-        logger.info("🎤 Listening for user input...")
+        logger.info("Listening for user input...")
         
         try:
-            result = self.stt.listen_and_transcribe()
+            result = self.stt.capture_and_transcribe()
+            # result = self.stt.capture_and_transcribe(duration=5)
+
             
-            if result["success"]:
-                transcription = result["transcription"]
-                confidence = result["confidence"]
+            if result.success:
+                transcription = result.transcription
+                confidence = result.confidence
                 
                 logger.info(f"[USER] {transcription} (confidence: {confidence:.2f})")
                 
-                # Store in memory
-                self.session_memory.add_turn(
-                    role="user",
-                    content=transcription,
-                    metadata={"confidence": confidence, "turn": self.turn_count}
-                )
-                
                 # Handle low confidence
                 if confidence < 0.6:
-                    logger.warning(f"⚠ Low confidence transcription: {confidence:.2f}")
+                    logger.warning(f"Low confidence transcription: {confidence:.2f}")
                     self._handle_low_confidence(transcription, confidence)
                     return None
                 
                 return transcription
             else:
                 error = result.get("error", "Unknown error")
-                logger.error(f"❌ STT failed: {error}")
+                logger.error(f"STT failed: {error}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ Exception during listening: {e}", exc_info=True)
+            logger.error(f"Exception during listening: {e}", exc_info=True)
             return None
     
     def _speak_to_user(self, text: str):
@@ -234,56 +244,109 @@ class VoiceAgentOrchestrator:
         Args:
             text: Text to speak (in target language)
         """
-        logger.info(f"🔊 Speaking to user: {text}")
+        logger.info(f"Speaking to user: {text}")
         
         try:
             result = self.tts.speak(text)
             
-            if result["success"]:
-                # Store in memory
-                self.session_memory.add_turn(
-                    role="agent",
-                    content=text,
-                    metadata={"turn": self.turn_count}
-                )
-                logger.info("✓ TTS successful")
+            if result.success:
+                logger.info("TTS successful")
             else:
-                error = result.get("error", "Unknown error")
-                logger.error(f"❌ TTS failed: {error}")
+                error = result.error if hasattr(result, "error") else "Unknown error"
+                logger.error(f"TTS failed: {error}")
                 # Fallback: at least log the intended message
-                logger.warning(f"📝 Intended message: {text}")
+                logger.warning(f"Intended message: {text}")
                 
         except Exception as e:
-            logger.error(f"❌ Exception during speech: {e}", exc_info=True)
+            logger.error(f"Exception during speech: {e}", exc_info=True)
     
-    def _check_for_contradictions(self, user_input: str) -> Dict[str, Any]:
-        """Check if user input contradicts previous statements"""
-        logger.info("🔍 Checking for contradictions...")
+    def _check_for_contradictions(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Check if planner-extracted data contradicts stored profile.
+        
+        Args:
+            plan: Plan dict potentially containing extracted structured data
+            
+        Returns:
+            Dict with has_contradiction, message, and contradictions list
+        """
+        logger.info("Checking for contradictions...")
         
         try:
-            result = self.contradiction_handler.check_contradiction(user_input)
+            # Extract structured data from plan (if available)
+            new_data = plan.get("extracted_data", {})
             
-            if result["has_contradiction"]:
-                logger.warning(f"⚠ CONTRADICTION: {result['contradiction_type']}")
-                logger.warning(f"   Previous: {result.get('previous_value')}")
-                logger.warning(f"   Current: {result.get('current_value')}")
+            # Skip if no structured data available
+            if not new_data or not isinstance(new_data, dict):
+                logger.info("No structured data in plan, skipping contradiction check")
+                return {"has_contradiction": False}
             
-            return result
+            # Get existing profile from memory
+            existing_profile = self.session_memory.get_profile()
+            
+            # Skip if no existing profile
+            if not existing_profile:
+                logger.info("No existing profile, skipping contradiction check")
+                return {"has_contradiction": False}
+            
+            # Detect contradictions
+            contradictions = self.contradiction_handler.detect_contradictions(
+                new_data=new_data,
+                existing_profile=existing_profile,
+                turn_id=self.turn_count
+            )
+            
+            # Wrap result in expected format
+            if contradictions:
+                logger.warning(f"Found {len(contradictions)} contradiction(s)")
+                for c in contradictions:
+                    logger.warning(f"   - {c.field_name}: {c.old_value} → {c.new_value} (severity: {c.severity})")
+                
+                return {
+                    "has_contradiction": True,
+                    "message": "Contradictory information detected",
+                    "contradictions": [c.to_dict() for c in contradictions],
+                    "count": len(contradictions),
+                    "critical_count": sum(1 for c in contradictions if c.severity == "critical")
+                }
+            else:
+                logger.info("No contradictions detected")
+                return {"has_contradiction": False}
             
         except Exception as e:
-            logger.error(f"❌ Error checking contradictions: {e}", exc_info=True)
-            return {"has_contradiction": False}
+            logger.error(f"Error checking contradictions: {e}", exc_info=True)
+            return {"has_contradiction": False, "error": str(e)}
     
-    def _handle_contradiction(self, contradiction_result: Dict[str, Any]):
-        """Handle detected contradiction"""
-        clarification_message = contradiction_result.get("clarification_needed")
+    def _handle_contradiction(self, contradiction_result: Dict[str, Any]) -> str:
+        """
+        Handle detected contradiction.
         
-        if clarification_message:
-            self._speak_to_user(clarification_message)
-        else:
-            # Fallback clarification in Marathi
-            fallback = "माफ करा, मला काही गोंधळ झाला आहे. कृपया पुन्हा स्पष्ट करा."
-            self._speak_to_user(fallback)
+        Returns:
+            Agent response message
+        """
+        # Generate clarification message based on contradictions
+        contradictions = contradiction_result.get("contradictions", [])
+        
+        response = "माफ करा, मला काही गोंधळ झाला आहे. कृपया पुन्हा स्पष्ट करा."
+        
+        if contradictions:
+            # Use first critical or moderate contradiction for clarification
+            critical_or_moderate = [
+                c for c in contradictions 
+                if c.get("severity") in ["critical", "moderate"]
+            ]
+            
+            if critical_or_moderate:
+                first = critical_or_moderate[0]
+                field_name = first.get("field_name", "information")
+                old_value = first.get("old_value")
+                new_value = first.get("new_value")
+                
+                # Generate Marathi clarification
+                response = f"माफ करा, तुम्ही आधी {field_name} बद्दल '{old_value}' सांगितले होते, आता '{new_value}' सांगितले आहे. कृपया खात्री करा कोणती माहिती बरोबर आहे?"
+        
+        self._speak_to_user(response)
+        return response
     
     def _plan_action(self, user_input: str) -> Optional[Dict[str, Any]]:
         """
@@ -292,15 +355,15 @@ class VoiceAgentOrchestrator:
         Returns:
             Plan dict or None if planning failed
         """
-        logger.info("🧠 Planning next action...")
+        logger.info("Planning next action...")
         
         try:
             # Get current context
             context = {
                 "state": self.state_machine.current_state.value,
                 "turn": self.turn_count,
-                "user_profile": self.session_memory.get_user_profile(),
-                "conversation_summary": self.session_memory.get_recent_turns(n=3)
+                "user_profile": self.session_memory.get_profile(),
+                "conversation_summary": self.session_memory.get_conversation_history(last_n=3)
             }
             
             plan = self.planner.plan(
@@ -311,7 +374,7 @@ class VoiceAgentOrchestrator:
             return plan
             
         except Exception as e:
-            logger.error(f"❌ Planning error: {e}", exc_info=True)
+            logger.error(f"Planning error: {e}", exc_info=True)
             return None
     
     def _execute_action(self, plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -321,14 +384,14 @@ class VoiceAgentOrchestrator:
         Returns:
             Execution result
         """
-        logger.info(f"⚙️ Executing action: {plan['action_type']}")
+        logger.info(f"Executing action: {plan['action_type']}")
         
         try:
             result = self.executor.execute(plan)
             return result
             
         except Exception as e:
-            logger.error(f"❌ Execution error: {e}", exc_info=True)
+            logger.error(f"Execution error: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
@@ -346,13 +409,13 @@ class VoiceAgentOrchestrator:
         Returns:
             EvaluationResult
         """
-        logger.info("📊 Evaluating execution result...")
+        logger.info("Evaluating execution result...")
         
         try:
             context = {
                 "turn": self.turn_count,
                 "state": self.state_machine.current_state.value,
-                "user_profile": self.session_memory.get_user_profile()
+                "user_profile": self.session_memory.get_profile()
             }
             
             evaluation = self.evaluator.evaluate(
@@ -364,7 +427,7 @@ class VoiceAgentOrchestrator:
             return evaluation
             
         except Exception as e:
-            logger.error(f"❌ Evaluation error: {e}", exc_info=True)
+            logger.error(f"Evaluation error: {e}", exc_info=True)
             # Return default failure evaluation
             from agent.evaluator import EvaluationResult, EvaluationStatus
             return EvaluationResult(
@@ -381,32 +444,40 @@ class VoiceAgentOrchestrator:
         evaluation,
         plan: Dict[str, Any],
         execution_result: Dict[str, Any]
-    ):
+    ) -> str:
         """
         Handle evaluation outcome and respond to user.
+        
+        Returns:
+            Agent response message
         """
+        response = ""
+        
         if evaluation.status == EvaluationStatus.SUCCESS:
             # Generate response from execution result
             response = execution_result.get("response", "")
             if response:
                 self._speak_to_user(response)
             else:
-                logger.warning("⚠ No response in successful execution result")
+                logger.warning("No response in successful execution result")
         
         elif evaluation.status == EvaluationStatus.NEEDS_CLARIFICATION:
             # Ask for missing information
             missing = evaluation.missing_fields
-            clarification = self._generate_clarification_prompt(missing)
-            self._speak_to_user(clarification)
+            response = self._generate_clarification_prompt(missing)
+            self._speak_to_user(response)
         
         elif evaluation.status == EvaluationStatus.RETRY:
-            logger.info("🔄 Retry needed, replanning...")
-            # Retry logic handled by planner in next turn
+            logger.info("Retry needed, replanning...")
+            response = "मला समजले नाही. कृपया दुसऱ्या शब्दांत सांगा."
+            self._speak_to_user(response)
         
         elif evaluation.status == EvaluationStatus.FAILURE:
             # Inform user of failure
-            failure_message = self._generate_failure_message(evaluation)
-            self._speak_to_user(failure_message)
+            response = self._generate_failure_message(evaluation)
+            self._speak_to_user(response)
+        
+        return response
     
     def _update_state(self, evaluation, plan: Dict[str, Any]):
         """Update state machine based on evaluation"""
@@ -425,12 +496,12 @@ class VoiceAgentOrchestrator:
             if event:
                 success = self.state_machine.transition(event)
                 if success:
-                    logger.info(f"✓ State transitioned to: {self.state_machine.current_state.value}")
+                    logger.info(f"State transitioned to: {self.state_machine.current_state.value}")
                 else:
-                    logger.warning(f"⚠ State transition failed for event: {event}")
+                    logger.warning(f"State transition failed for event: {event}")
         
         except Exception as e:
-            logger.error(f"❌ State update error: {e}", exc_info=True)
+            logger.error(f"State update error: {e}", exc_info=True)
     
     def _map_plan_to_success_event(self, action_type: str) -> str:
         """Map action type to state machine event"""
@@ -513,7 +584,7 @@ class VoiceAgentOrchestrator:
     
     def _graceful_shutdown(self):
         """Gracefully shutdown the agent"""
-        logger.info("\n🛑 Initiating graceful shutdown...")
+        logger.info("\n Initiating graceful shutdown...")
         
         goodbye_messages = {
             "marathi": "धन्यवाद! पुन्हा भेटू.",
@@ -526,20 +597,21 @@ class VoiceAgentOrchestrator:
         
         # Save session
         try:
-            self.session_memory.save_session()
-            logger.info("✓ Session saved successfully")
+            session_file = f"session_{self.session_id}.json"
+            self.session_memory.export_to_json(session_file)
+            logger.info(f"✓ Session saved to {session_file}")
         except Exception as e:
-            logger.error(f"❌ Failed to save session: {e}")
+            logger.error(f"Failed to save session: {e}")
         
         # Cleanup
         self._cleanup()
         
         self.is_running = False
-        logger.info("✓ Shutdown complete")
+        logger.info("Shutdown complete")
     
     def _emergency_shutdown(self):
         """Emergency shutdown on critical error"""
-        logger.error("🚨 EMERGENCY SHUTDOWN")
+        logger.error("EMERGENCY SHUTDOWN")
         
         try:
             self._speak_to_user("माफ करा, काही चूक झाली. मी बंद होत आहे.")
@@ -551,7 +623,7 @@ class VoiceAgentOrchestrator:
     
     def _cleanup(self):
         """Cleanup resources"""
-        logger.info("🧹 Cleaning up resources...")
+        logger.info("Cleaning up resources...")
         
         try:
             if hasattr(self.stt, 'cleanup'):
@@ -560,7 +632,7 @@ class VoiceAgentOrchestrator:
                 self.tts.cleanup()
             logger.info("✓ Cleanup complete")
         except Exception as e:
-            logger.error(f"❌ Cleanup error: {e}")
+            logger.error(f"Cleanup error: {e}")
 
 
 def main():
@@ -582,8 +654,8 @@ def main():
     try:
         orchestrator.start()
     except Exception as e:
-        logger.critical(f"💥 Fatal error: {e}", exc_info=True)
-        print(f"\n❌ Fatal error occurred. Check logs for details.")
+        logger.critical(f"Fatal error: {e}", exc_info=True)
+        print(f"\nFatal error occurred. Check logs for details.")
     
     print("\n" + "=" * 80)
     print("SESSION ENDED")
